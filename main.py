@@ -1,18 +1,15 @@
 """
-Flow KB (FastHTML edition) - Data Strategy Limited client data-workflow knowledge base.
+Flow KB (FastHTML edition), LOCAL-ONLY build - Data Strategy Limited client data-workflow knowledge base.
 
-    FLOWKB_PASSWORD='choose-a-long-password' python main.py     ->  http://localhost:5001
+    python main.py     ->  http://127.0.0.1:5001
 
-Plash conventions followed: entry point main.py, dependencies in requirements.txt, port 5001
-(FastHTML's serve() default), persistent SQLite in data/, secrets via plash.env.
+No login, no password, no rate limit, no hosting config. Listens on 127.0.0.1 only.
+Data is kept in data/flowkb.db next to this file. Never deploy this folder.
 """
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 import sys
-import time
 import traceback
 from pathlib import Path
 
@@ -25,56 +22,13 @@ DATA = HERE / "data"
 DATA.mkdir(exist_ok=True)
 
 
-def _load_env_file(fn):
-    "Load `export KEY=VALUE` lines from plash.env for local runs (never overrides real env vars)."
-    p = HERE / fn
-    if not p.exists():
-        return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[7:]
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'\""))
-
-
-_load_env_file("plash.env")
-IN_PRODUCTION = os.getenv("PLASH_PRODUCTION") == "1"   # set automatically by Plash
-PASSWORD = os.getenv("FLOWKB_PASSWORD", "")
-if len(PASSWORD) < 8:
-    sys.exit("\n  Flow KB refuses to start: set FLOWKB_PASSWORD (8+ characters).\n"
-             "  Local:  FLOWKB_PASSWORD='your-long-password' python main.py\n"
-             "          (or put  export FLOWKB_PASSWORD='...'  in plash.env)\n"
-             "  Plash:  add it to plash.env, then run plash-deploy.\n")
-# Sessions are tagged with a fingerprint of the password, so changing it logs everyone out.
-PW_TAG = hashlib.sha256(("flowkb:" + PASSWORD).encode()).hexdigest()[:24]
-
 import flowkb_core as core  # noqa: E402
 
 core.init_db()   # creates data/flowkb.db and seeds the example project on first run
 
 
-# --------------------------------------------------------------------------- auth
-_failures = {}   # ip -> [timestamps]; simple brute-force throttle
-MAX_FAILS, WINDOW = 10, 15 * 60
-
-
-def client_ip(req):
-    # Use the right-most X-Forwarded-For entry (added by the nearest proxy, i.e. Plash's), which a
-    # client cannot forge; left-most entries are client-supplied.
-    fwd = req.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[-1].strip() if fwd else (req.client.host if req.client else "?")
-
-
-def auth_before(req, sess):
-    if sess.get("auth") != PW_TAG:
-        if req.url.path.startswith("/api/"):
-            return JSONResp({"error": "Login required"}, status_code=401)
-        return RedirectResponse("/login", status_code=303)
-    # CSRF hardening: state-changing API calls must be JSON (forces a CORS preflight cross-site;
-    # the session cookie is also SameSite=Lax).
+def json_only(req):
+    # No login. State-changing API calls must still be JSON.
     if req.url.path.startswith("/api/") and req.method in ("POST", "PATCH", "PUT"):
         if "application/json" not in req.headers.get("content-type", ""):
             return JSONResp({"error": "Content-Type must be application/json"}, status_code=415)
@@ -87,79 +41,15 @@ async def bad_json(req, exc):
 
 app, rt = fast_app(
     exception_handlers={json.JSONDecodeError: bad_json},
-    before=Beforeware(auth_before, skip=[r"/login", r"/favicon\.ico"]),
+    before=Beforeware(json_only),
     pico=False, surreal=False,
     static_path=str(HERE / "static"),
-    key_fname=str(DATA / ".sesskey"),          # persisted in data/ so sessions survive redeploys
-    secret_key=os.getenv("FLOWKB_SESSION_SECRET") or None,
-    session_cookie="flowkb_session",
-    max_age=30 * 24 * 3600,
-    sess_https_only=IN_PRODUCTION,
-    same_site="lax",
+    secret_key=os.urandom(32).hex(),   # FastHTML requires one internally; random, in memory, never used for login
     title="Flow KB · Data Strategy Limited",
 )
 
 FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' "
            "height='16' rx='3' fill='%230f172a'/%3E%3Cpath d='M3 4h4v3H3zM9 9h4v3H9z' fill='%2360a5fa'/%3E%3C/svg%3E")
-
-LOGIN_CSS = """
-body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f1f5f9;margin:0;display:grid;place-items:center;min-height:100vh;color:#0f172a}
-.card{background:#fff;border:1px solid #cbd5e1;border-radius:14px;padding:28px 30px;width:min(380px,92vw);box-shadow:0 10px 30px rgba(15,23,42,.08)}
-h1{font-size:20px;margin:0 0 2px}.sub{color:#64748b;font-size:13px;margin-bottom:18px}
-label{font-size:13px;font-weight:600;display:block;margin-bottom:4px}
-input{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:8px;padding:9px 10px;font:inherit}
-button{margin-top:14px;width:100%;background:#0f172a;color:#fff;border:0;border-radius:8px;padding:10px;font:inherit;font-weight:600;cursor:pointer}
-#login-msg{min-height:20px;margin-top:10px;font-size:13px;color:#dc2626}
-"""
-
-
-def login_page(msg=""):
-    return (Title("Log in · Flow KB"), Link(rel="icon", href=FAVICON), Style(LOGIN_CSS),
-            Div(H1("◆ Flow KB"), Div("Data Strategy Limited · client data-workflow knowledge base", cls="sub"),
-                Form(Label("Password", fr="password"),
-                     Input(type="password", name="password", id="password", autofocus=True, required=True,
-                           autocomplete="current-password"),
-                     Button("Log in", type="submit"),
-                     Div(msg, id="login-msg"),
-                     method="post", action="/login", hx_post="/login", hx_target="#login-msg", hx_swap="innerHTML"),
-                cls="card"))
-
-
-@rt("/login")
-def get(sess):
-    if sess.get("auth") == PW_TAG:
-        return RedirectResponse("/", status_code=303)
-    return login_page()
-
-
-@rt("/login")
-async def post(req, sess, password: str = ""):
-    ip, now = client_ip(req), time.time()
-    recent = [t for t in _failures.get(ip, []) if now - t < WINDOW]
-    is_htmx = req.headers.get("hx-request") == "true"
-    if len(recent) >= MAX_FAILS:
-        msg = "Too many failed attempts. Try again in a few minutes."
-        return (msg if is_htmx else Response(to_xml(login_page(msg)), status_code=429, media_type="text/html"))
-    if hmac.compare_digest(password.encode("utf-8"), PASSWORD.encode("utf-8")):
-        _failures.pop(ip, None)
-        sess["auth"] = PW_TAG
-        if is_htmx:
-            return HttpHeader("HX-Redirect", "/")
-        return RedirectResponse("/", status_code=303)
-    recent.append(now)
-    _failures[ip] = recent
-    await asyncio.sleep(1)   # slow down guessing
-    msg = "Incorrect password."
-    if is_htmx:
-        return msg
-    return Response(to_xml(login_page(msg)), status_code=401, media_type="text/html")
-
-
-@rt("/logout")
-def post(sess):
-    sess.clear()
-    return RedirectResponse("/login", status_code=303)
-
 
 # --------------------------------------------------------------------------- main page
 EDGE_SVG = NotStr("""<svg id="edges" xmlns="http://www.w3.org/2000/svg"><defs>
@@ -200,7 +90,6 @@ def toolbar():
             Button("Search KB", id="btnSearch", title="Search across all projects"),
             Button("SQL", id="btnSql", title="Run read-only SQL queries against the knowledge base"), cls="group"),
         Div(Div("✓ Saved", id="saveStatus", cls="status ok", title="Every change is saved automatically"),
-            Form(Button("⏻", type="submit", title="Log out", aria_label="Log out"), id="logoutForm", method="post", action="/logout"),
             cls="tb-right"),
         id="toolbar")
 
@@ -307,6 +196,5 @@ for _path, _method, _fn in [
     api(_path, _method, _fn)
 
 
-# Plash exposes port 5001 only, so production always binds 5001 (FastHTML's default).
-# Locally you may override with FLOWKB_PORT. Auto-reload is for local development only.
-serve(port=5001 if IN_PRODUCTION else int(os.getenv("FLOWKB_PORT", "5001")), reload=not IN_PRODUCTION)
+# Local only: bind to this machine. Override the port with FLOWKB_PORT.
+serve(host="127.0.0.1", port=int(os.getenv("FLOWKB_PORT", "5001")), reload=False)

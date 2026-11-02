@@ -17,7 +17,7 @@ import uuid
 APP_NAME = "Flow KB"
 APP_VERSION = "1.0.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(APP_DIR, "data")          # Plash keeps data/ between deployments
+DATA_DIR = os.path.join(APP_DIR, "data")          # local SQLite database lives here
 DB_PATH = os.environ.get("FLOWKB_DB") or os.path.join(DATA_DIR, "flowkb.db")
 LOCK = threading.RLock()
 

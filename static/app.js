@@ -48,7 +48,6 @@ async function api(method, url, body, opts) {
       method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }, opts || {}));
-    if (r.status === 401) { location.href = '/login'; throw Object.assign(new Error('Session expired - please log in again'), { status: 401 }); }
     const ct = r.headers.get('content-type') || '';
     const data = ct.includes('json') ? await r.json() : await r.text();
     if (!r.ok) { const err = new Error((data && data.error) || r.statusText); err.status = r.status; throw err; }
